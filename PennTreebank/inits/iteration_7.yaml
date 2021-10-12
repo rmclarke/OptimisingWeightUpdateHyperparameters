@@ -1,0 +1,6 @@
+config_dicts:
+  network_weight:
+    lr: -3.719013214111328
+    # lr_multiplier: 0.9984763264656067
+    momentum: 2.0177720231575353
+    weight_decay: -5.1678466796875

@@ -1,0 +1,6 @@
+algorithm: Random_SteppedLR
+config_dicts:
+  network_weight:
+    lr_multiplier: 0.99
+validation_proportion: 0
+patch_optimiser: False

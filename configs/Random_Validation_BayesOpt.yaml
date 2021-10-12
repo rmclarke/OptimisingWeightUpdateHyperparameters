@@ -1,0 +1,4 @@
+algorithm: Random_Validation
+# validation_proportion: UNCHANGED
+# full_batch_validation_evaluations: NOT NEEDED - WILL POST-EVALUATE
+patch_optimiser: False

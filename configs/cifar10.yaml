@@ -1,0 +1,29 @@
+config_dicts :
+  model:
+    class: resnet18
+    num_classes: 10
+  loss:
+    class: CrossEntropyLoss
+  dataset:
+    class: CIFAR10
+    normalise_inputs: False  # Handled through dataset transform
+    normalise_outputs: False
+  network_weight:
+    class: SGD
+    lr: -3.3534718751907349
+    weight_decay: -6.2753795385360718
+    momentum: 1.212821931
+
+# 72 complete passes through the training dataset (45000 samples),
+# updating hyperparameters every 10 training updates
+network_weight_steps: 10
+hyperparameter_steps: 3240
+validation_proportion: 0.1  # 5000/50000
+device: cuda
+batch_size: 100
+transformed_hyperparameters:
+  lr: 10^
+  weight_decay: 10^
+  momentum: sigmoid
+hyperparameter_clipping:
+  lr: [-10.0, 0.0]

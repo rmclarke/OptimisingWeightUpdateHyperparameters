@@ -1,0 +1,2 @@
+Fair-use subset of the full Penn Treebank-3 corpus
+http://www.fit.vutbr.cz/\~imikolov/rnnlm/simple-examples.tgz

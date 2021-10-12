@@ -1,0 +1,12 @@
+algorithm: Baydin
+config_dicts:
+  hyperparameter:
+    class: SGD
+    lr: 0.001
+  hyperparameter_wrapper:
+    class: BaydinHypergradientDescent
+optimised_hyperparameters: [lr]
+validation_proportion: 0
+patch_optimiser: True
+null_zero_validation_datasets: False
+force_single_network_weight_step: True

@@ -1,0 +1,10 @@
+algorithm: Ours_LR
+config_dicts:
+  hyperparameter:
+    class: Adam
+    lr: 0.05
+  hyperparameter_wrapper:
+    class: NeumannHypergradientOptimiser
+    hyperparameter_rollback_distance: 5
+optimised_hyperparameters: [weight_decay, lr]
+patch_optimiser: True

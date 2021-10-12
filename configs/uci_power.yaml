@@ -1,0 +1,28 @@
+config_dicts :
+  model:
+    class: MultiLayerPerceptron
+    layer_sizes: [4, 50, 1]
+    activation_function: ReLU
+  loss:
+    class: MSELoss
+  dataset:
+    class: UCI_Power
+    normalise_inputs: True
+    normalise_outputs: True
+  network_weight:
+    class: SGD
+    lr: -3.0
+    weight_decay: -16.0
+    momentum: 0.5
+
+network_weight_steps: 10
+hyperparameter_steps: 400
+validation_proportion: 0.2  # 1722/8611
+device: cuda
+batch_size: 8611
+transformed_hyperparameters:
+  lr: 10^
+  weight_decay: 10^
+  momentum: sigmoid
+hyperparameter_clipping:
+  lr: [-10.0, 0.0]

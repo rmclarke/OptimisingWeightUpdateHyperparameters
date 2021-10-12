@@ -1,0 +1,29 @@
+config_dicts :
+  model:
+    class: MultiLayerPerceptron
+    layer_sizes: [784, 50, 10]
+    activation_function: ReLU
+    batch_norm: False
+  loss:
+    class: CrossEntropyLoss
+  dataset:
+    class: FashionMNIST
+    normalise_inputs: True
+    normalise_outputs: False
+  network_weight:
+    class: SGD
+    lr: -3.0
+    weight_decay: -6.0
+    momentum: 0.0
+
+network_weight_steps: 10
+hyperparameter_steps: 1000
+validation_proportion: 0.166667  # 10000/60000
+device: cuda
+batch_size: 50
+transformed_hyperparameters:
+  lr: 10^
+  weight_decay: 10^
+  momentum: sigmoid
+hyperparameter_clipping:
+  lr: [-10.0, 0.0]

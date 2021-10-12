@@ -1,0 +1,24 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+tqdm = "*"
+torch = {file = "https://download.pytorch.org/whl/cu101/torch-1.8.1%2Bcu101-cp39-cp39-linux_x86_64.whl"}
+torchvision = {file = "http://download.pytorch.org/whl/cu101/torchvision-0.9.1%2Bcu101-cp39-cp39-linux_x86_64.whl"}
+higher = "*"
+configargparse = "*"
+pyyaml = "*"
+matplotlib = "*"
+scipy = "*"
+bayesian-optimization = "*"
+
+[dev-packages]
+tensorboard = "*"
+ipython = "*"
+torchviz = "*"
+plotly = "*"
+
+[requires]
+python_version = "3.9"

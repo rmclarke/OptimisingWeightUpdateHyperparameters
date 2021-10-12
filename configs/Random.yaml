@@ -1,0 +1,3 @@
+algorithm: Random
+validation_proportion: 0
+patch_optimiser: False

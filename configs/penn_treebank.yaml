@@ -1,0 +1,37 @@
+config_dicts :
+  model:
+    class: LSTMwithEmbedding
+    num_tokens: 10000
+    input_size: 650
+    hidden_size: 650
+    num_layers: 2
+  loss:
+    class: CrossEntropyLoss
+  dataset:
+    class: PennTreebank
+    normalise_inputs: False
+    normalise_outputs: False
+    parallel_sequences: 40  # Same for all datasets
+  network_weight:
+    class: SGD
+    lr: -1.3534718751907349
+    weight_decay: -9.0
+    momentum: 0.0
+
+# 72 complete passes through the training dataset (929589 words),
+# updating hyperparameters every 10 training updates
+network_weight_steps: 10
+hyperparameter_steps: 2391  # 1196 = approx 2391/2
+validation_proportion: 0.07351380  # 73760/1003349
+multi_batch_test_dataset_evaluations: True
+penn_treebank_validation_override: True  # Only acts in Random_Validation config
+device: cuda
+batch_size: 70
+transformed_hyperparameters:
+  lr: 10^
+  weight_decay: 10^
+  momentum: sigmoid
+network_weight_grad_clipping:
+  norm: 0.25
+hyperparameter_clipping:
+  lr: [-10.0, 0.0]
