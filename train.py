@@ -1,12 +1,15 @@
 """Main system training function and helpers."""
 
+import copy
 import json
 import os
+import pathlib
 from contextlib import contextmanager
 from itertools import repeat, chain
 
 import higher
 import numpy as np
+import ray.tune as tune
 import torch as to
 import tqdm
 from torch.utils.tensorboard import SummaryWriter
@@ -41,8 +44,9 @@ class Learner():
                  multi_batch_test_dataset_evaluations,
                  penn_treebank_validation_override,
                  full_batch_validation_evaluations,
-                 reset_loop_before_hyperparameter_step=-1,
-                 process_id=0):
+                 reset_loop_before_hyperparameter_step,
+                 process_id=0,
+                 _ray_tune_config=False):
 
         self.config_dicts = config_dicts
         self.device = device
@@ -87,6 +91,7 @@ class Learner():
 
         self.tracker = tensorboard_tracker
         self.process_id = process_id
+        self._ray_tune_config = _ray_tune_config
 
         self.model = getattr(models,
                              self.config_dicts['model']['class'])(
@@ -100,6 +105,10 @@ class Learner():
         self.enable_hyperparameter_high_dimensionality()
         self.construct_dataloaders()
         self.construct_optimisers()
+
+        # Needed so we can detect Ray Tune perturbations
+        self.initial_network_weight_dict = copy.deepcopy(
+            self.config_dicts['network_weight'])
 
     def check_config_validity(self):
         """Make sure the requested combination of configuration settings makes
@@ -179,6 +188,7 @@ class Learner():
 
         if self.full_batch_validation_evaluations and not self.penn_treebank_validation_override:
             self.validation_dataloader = repeat(validation_dataset[:])
+            self.full_validation_dataloader = self.validation_dataloader
         else:
             self.full_validation_dataloader = repeat(validation_dataset[:])
             self.validation_dataloader = to.utils.data.DataLoader(
@@ -385,6 +395,11 @@ class Learner():
             step = ((self.hyperparameter_step * self.network_weight_steps)
                     + self.network_weight_step)
 
+        if self._ray_tune_config:
+            # Undo Ray's directory changing so our relative paths work
+            os.chdir(
+                pathlib.Path(__file__).parent.resolve())
+
         self.tracker.add_scalar('{}Loss/Training'.format(key_prefix),
                                 self.training_loss.item(),
                                 step)
@@ -511,7 +526,7 @@ class Learner():
         """Execute a training run.
         """
         self.model.to(device=self.device)
-        original_state_dict = self.model.state_dict()
+        original_state_dict = copy.deepcopy(self.model.state_dict())
 
         repeating_training_dataloader = datasets.repeating_dataloader(
             self.training_dataloader,
@@ -573,9 +588,21 @@ class Learner():
                             self.log_now()
                             self.network_weight_optimiser.step(self.training_loss)
 
-                            if self.lr_multiplier:
-                                for group in self.network_weight_optimiser.param_groups:
-                                    group['lr'] *= self.lr_multiplier
+                            if self._ray_tune_config and (
+                                    self.network_weight_steps - self.network_weight_step > 1):
+                                # This might be our last chance to report, so
+                                # can't rely on the next report picking up
+                                # newer values, so we refresh them here
+                                with to.no_grad():
+                                    new_validation_loss = self._compute_loss(
+                                        validation_batch, "Validation")
+                                    new_test_loss = self._compute_loss(
+                                        test_batch, "Test")
+                                # self._compute_loss() also updates
+                                # self.unnormalised_losses
+                                tune.report(validation_loss=new_validation_loss.item() if not to.isnan(new_validation_loss) else float('inf'),
+                                            test_loss=new_test_loss.item(),
+                                            unnormalised_test_loss=self.unnormalised_losses['Test'].item())
                             if (self.network_weight_steps - self.network_weight_step - 1
                                     == self.reset_loop_before_hyperparameter_step):
                                 continue_inner_loop = True
@@ -590,16 +617,82 @@ class Learner():
                             self.model.train()
                             new_validation_loss = self._compute_loss(
                                 validation_batch, "Validation")
+                            # BaydinHypergradientOptimiser needs old and new
+                            # losses here.
+                            # All others will ignore self.training_loss
                             self.hyperparameter_optimiser.step(
                                 self.training_loss, new_validation_loss)
+                        if self.lr_multiplier:
+                            # Need to manually add hyperparameter clipping support,
+                            # because these hyperparameters aren't transformed,
+                            # so we need to transform the clipping limits
+                            assert self.transformed_hyperparameters['lr'] == '10^'
+                            for group in self.network_weight_optimiser.param_groups:
+                                group['lr'] *= self.lr_multiplier
+                                if 'lr' in self.hyperparameter_clipping:
+                                    group['lr'] = np.clip(
+                                        group['lr'],
+                                        a_min=10**self.hyperparameter_clipping['lr'][0],
+                                        a_max=10**self.hyperparameter_clipping['lr'][1])
                         if self.reset_model_after_hyperparameter_update:
                             if (self.renew_model_reset_state_interval is not None
                                 and ((self.hyperparameter_step + 1)
-                                   % self.renew_model_reset_state_interval == 0)):
-                                original_state_dict = self.model.state_dict()
-                            else:
+                                     % self.renew_model_reset_state_interval == 0)):
+                                original_state_dict = copy.deepcopy(self.model.state_dict())
+                            elif self.hyperparameter_step < self.hyperparameter_steps - 1:
+                                # Only reset the model if we aren't on the very
+                                # last hyperparameter_step.
+                                # We'll miss logging the final pre-reset
+                                # losses, but we would only be reporting these
+                                # graphically, where the difference would be
+                                # invisible, so the plotting error is negligible.
                                 self.model.load_state_dict(original_state_dict)
+                    # Outside model patch
+                    if self._ray_tune_config:
+                        # Checkpoint before reporting results, as the latter
+                        # might cancel this run immediately
+                        step = ((self.hyperparameter_step * self.network_weight_steps)
+                                + self.network_weight_step)
+                        with tune.checkpoint_dir(step=step) as checkpoint_dir:
+                            self.save_training_state(
+                                os.path.join(checkpoint_dir, 'checkpoint.pt'))
+                        # This might be our last chance to report, so can't
+                        # rely on the next report picking up newer values, so
+                        # we refresh them here
+                        with to.no_grad():
+                            # It isn't unfair to recalculate
+                            # new_validation_loss if we already did above,
+                            # because this one is a constant overhead for
+                            # all Ray configurations
+                            new_validation_loss = self._compute_loss(
+                                validation_batch, "Validation")
+                            new_test_loss = self._compute_loss(
+                                test_batch, "Test")
+                        # self._compute_loss() also updates
+                        # self.unnormalised_losses
+                        tune.report(validation_loss=new_validation_loss.item() if not to.isnan(new_validation_loss) else float('inf'),
+                                    test_loss=new_test_loss.item(),
+                                    unnormalised_test_loss=self.unnormalised_losses['Test'].item())
                 self.postprocess_hyperparameters()
+
+            # Final loss evaluation for completeness of logs
+            with to.no_grad(), self.patched_modules(track_higher_grads=False):
+                self.model.train()
+                self.install_hyperparameters()
+                self.training_loss = self._compute_loss(
+                    next(repeating_training_dataloader), "Training")
+                self.validation_loss = self._compute_loss(
+                    next(repeating_validation_dataloader), "Validation")
+
+                self.model.eval()
+                self.test_loss = self._compute_loss(
+                    next(repeating_test_dataloader), "Test")
+
+                # Log a new entry, but then put network_weight_step back where
+                # it's expected
+                self.network_weight_step += 1
+                self.log_now()
+                self.network_weight_step -= 1
 
     def _compute_loss(self, batch, label):
         """Perform a forward pass of the current model using `batch`, computing
@@ -652,14 +745,18 @@ class Learner():
         """
         state_dict = {
             'model_state_dict': self.model.state_dict(),
+            'initial_network_weight_dict': self.initial_network_weight_dict,
             'network_weight_dict': self.config_dicts['network_weight'],
             'network_weight_optimiser_state_dict': self.network_weight_optimiser.state_dict(),
-            'hyperparameter_optimiser_state_dict': self.hyperparameter_optimiser.state_dict(),
             'network_weight_step': self.network_weight_step,
             'hyperparameter_step': self.hyperparameter_step,
             'training_loss': self.training_loss,
             'validation_loss': self.validation_loss,
-            'test_loss': self.test_loss}
+            'test_loss': self.test_loss,
+            'log_directory': self.tracker.log_dir}
+        if self.hyperparameter_optimiser:
+            state_dict['hyperparameter_optimiser_state_dict'] = (
+                self.hyperparameter_optimiser.state_dict())
         state_dict.update(state_updates)
         to.save(state_dict, save_file)
 
@@ -669,12 +766,60 @@ class Learner():
         # Optimiser state reading depends on model device, so set that here
         self.model.to(device=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.config_dicts['network_weight'].update(
-            checkpoint['network_weight_dict'])
+
+        # Now PyTorch does a deepcopy of the state_dict, so must manually
+        # overwrite hyperparameters to retain identical equality
         self.network_weight_optimiser.load_state_dict(
             checkpoint['network_weight_optimiser_state_dict'])
-        self.hyperparameter_optimiser.load_state_dict(
-            checkpoint['hyperparameter_optimiser_state_dict'])
+        for live_param_group, checkpoint_param_group in zip(
+                self.network_weight_optimiser.param_groups,
+                checkpoint['network_weight_optimiser_state_dict']['param_groups']):
+            live_param_group.update({
+                key: value
+                for key, value in checkpoint_param_group.items()
+                if key != 'params'})
+
+        perturbed_initial_config = any(
+            next(iter(self.config_dicts['network_weight'][key]))
+            != next(iter(checkpoint['initial_network_weight_dict'][key]))
+            if isinstance(self.config_dicts['network_weight'][key], repeat)
+            else False  # Not implemented for non-scalar hyperparameters
+            for key in self.config_dicts['network_weight'])
+        if self._ray_tune_config and perturbed_initial_config:
+            # Ray Tune has perturbed the initial hyperparameters.
+            # Work out by what ratio, then apply the same perturbation to our
+            # tuned hyperparameters, and use those
+            perturbation_ratios = {
+                key:
+                next(iter(self.config_dicts['network_weight'][key]))
+                / next(iter(checkpoint['initial_network_weight_dict'][key]))
+                for key in checkpoint['initial_network_weight_dict']
+                if key != 'class'}
+            self.config_dicts['network_weight'].update(
+                checkpoint['network_weight_dict'])
+
+            for key, ratio in perturbation_ratios.items():
+                value_iterable = self.config_dicts['network_weight'][key]
+                assert isinstance(value_iterable, repeat)
+                value = next(iter(value_iterable))
+                if isinstance(value, to.Tensor):
+                    value.data *= ratio
+                else:
+                    self.config_dicts['network_weight'][key] = repeat(value * ratio)
+        else:
+            self.config_dicts['network_weight'].update(
+                checkpoint['network_weight_dict'])
+
+        if 'hyperparameter_optimiser_state_dict' in checkpoint:
+            self.hyperparameter_optimiser.load_state_dict(
+                checkpoint['hyperparameter_optimiser_state_dict'])
+
+        if self._ray_tune_config:
+            # We're restarting from an arbitrary point, rather than just
+            # repeating the same number of steps as for Penn Treebank, so load
+            # current optimisation step indices too
+            self.network_weight_step = checkpoint['network_weight_step']
+            self.hyperparameter_step = checkpoint['hyperparameter_step']
 
 
 def main(config_dict=None, config_override={}):
@@ -688,7 +833,7 @@ def main(config_dict=None, config_override={}):
 
     # Must always call config.log_directory() to clean up config
     log_directory = config.log_directory(config_dict)
-    if load_state:
+    if load_state and not config_dict.get('_ray_tune_config', False):
         log_directory = to.load(load_state)['log_directory']
     process_id = config.parallel_process_id()
 
@@ -715,8 +860,7 @@ def main(config_dict=None, config_override={}):
             learner.load_training_state(load_state)
         learner.train()
         if save_state:
-            learner.save_training_state(save_state,
-                                        log_directory=log_directory)
+            learner.save_training_state(save_state)
     # Compute fresh validation and test losses to return
     return (learner._compute_loss(next(iter(learner.full_validation_dataloader)),
                                   'Validation').item(),
@@ -724,5 +868,7 @@ def main(config_dict=None, config_override={}):
                                   'Test').item())
 
 
+# Python <=3.8 uses a relative __file__; force it to be absolute
+__file__ = os.path.abspath(__file__)
 if __name__ == '__main__':
     main()

@@ -1,0 +1,14 @@
+algorithm: LongDiffThroughOpt
+config_dicts:
+  hyperparameter:
+    class: Adam
+    lr: 0.05
+  hyperparameter_wrapper:
+    class: ExactHypergradientOptimiser
+optimised_hyperparameters: [lr, weight_decay, momentum]
+reset_model_after_hyperparameter_update: True
+patch_optimiser: True
+
+# Assuming this is being done on UCI datasets
+network_weight_steps: 200
+hyperparameter_steps: 30

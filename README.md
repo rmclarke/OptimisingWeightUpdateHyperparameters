@@ -1,5 +1,7 @@
-This repository contains code for the paper _Scalable One-Pass Optimisation of
-High-Dimensional Weight-Update Hyperparameters by Implicit Differentiation_.
+This repository contains code for the paper [_Scalable One-Pass Optimisation of
+High-Dimensional Weight-Update Hyperparameters by Implicit
+Differentiation_](https://openreview.net/forum?id=hfU7Ka5cfrC), published at
+ICLR 2022.
 
 # Installation
 Our dependencies are fully specified in `Pipfile`, which can be supplied to
@@ -17,7 +19,8 @@ dump of our development environment in `final_requirements.txt`.
 Datasets may not be bundled with the repository, but are expected to be found at
 locations specified in `datasets.py`, preprocessed into single PyTorch tensors
 of all the input and output data (generally `data/<dataset>/data.pt` and
-`data/<dataset>/targets.pt`). 
+`data/<dataset>/targets.pt`). Running the script `download_and_process_data.py`
+will acquire and process all the necessary data into the required format.
 
 # Configuration
 Training code is controlled with YAML configuration files, as per the examples
@@ -29,12 +32,16 @@ reasonably self-explanatory.
 For _Ours (WD+LR)_, use the file `Ours_LR.yaml`; for _Ours (WD+LR+M)_, use the
 file `Ours_LR_Momentum.yaml`; for _Ours (WD+HDLR+M)_, use the file
 `Ours_HDLR_Momentum.yaml`. For _Long/Medium/Full Diff-through-Opt_, we provide
-separate configuration files for the UCI cases and the Fashion-MNIST cases.
+separate configuration files for the UCI cases and the Fashion-MNIST cases,
+labelled `Standalone`, `Medium` and `Full` respectively.
 
 We provide two additional helper configurations. `Random_Validation.yaml` copies
 `Random.yaml`, but uses the entire validation set to compute the validation loss
 at each logging step. This allows for stricter analysis of the best-performing
-run at particular time steps, for instance while constructing _Random (3-batched)_.
+run at particular time steps, for instance while constructing _Random
+(3-batched)_. `Random_TrainingSetOnly.yaml` also copies `Random.yaml`, but does
+not combine the training and validation datasets, so we can retain an unseen
+validation set for use by ASHA and PBT in the corresponding experiments.
 `Random_Validation_BayesOpt.yaml` only forces the use of the entire dataset for
 the very last validation loss computation, so that Bayesian Optimisation runs
 can access reliable performance metrics without adversely affecting runtime.
@@ -42,11 +49,15 @@ can access reliable performance metrics without adversely affecting runtime.
 The configurations provided match those necessary to replicate the main
 experiments in our paper (in Section 4: Experiments). Other trials, such as
 those in the Appendix, will require these configurations to be modified as we
-describe in the paper. Note especially that our three short-horizon bias studies
-all require different modifications to the `LongDiffThroughOpt_*.yaml`
-configurations. 
+describe in the paper. 
 
 # Running
+The script `run_all.py` provides commands for running all experiments except
+those on PennTreebank and CIFAR-10, and will do so when run (but be warned, it
+will take weeks to finish!). Inspecting this file will reveal the configurations
+required for each individual experiment, which may facilitate use of the more
+granular execution commands described in the rest of this section.
+
 Individual runs are commenced by executing `train.py` and passing the desired
 configuration files with the `-c` flag. For example, to run the default Fashion-MNIST experiments
 using Diff-through-Opt, use:
@@ -77,11 +88,27 @@ we use, and `iteration_id`, which should be used with Bayesian Optimisation runs
 to name each parallel run using a counter. Other generators may be useful if you
 wish to supplement existing results with additional algorithms etc.
 
+ASHA and PBT experiments are configured and executed by the functions
+`ray_tune_run_asha` and `ray_tune_run_pbt` in `parallel_exec.py`, which require
+the specification of a `num_workers` and `num_repetitions` as before, and
+additionally a `name` for the log folders. Note our implementation requires the
+`__file__` property to contain an absolute path, which is only the case by
+default from Python 3.9. In earlier versions, this can be fixed with the
+snippet
+
+``` python
+__file__ = os.path.abspath("parallel_exec.py")
+```
+prior to calling either of the execution functions in `parallel_exec.py`.
+
 PennTreebank and CIFAR-10 were executed on clusters running SLURM; the
 corresponding subfolders contain configuration scripts for these experiments,
 and `submit.sh` handles the actual job submission.
 
 # Analysis
+If you used `run_all.py` to execute the experiments, the function
+`run_all.parse_results()` may be useful to automate data extraction.
+
 By default, runs are logged in Tensorboard format to the `./runs` directory,
 where Tensorboard may be used to inspect the results. If desired, a descriptive
 name can be appended to a particular execution using the `-n` switch on the

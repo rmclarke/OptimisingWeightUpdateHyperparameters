@@ -2,19 +2,21 @@
 import os
 import pickle
 from contextlib import contextmanager
-from itertools import chain
 from functools import partial
 
 import torch as to
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from cycler import cycler
+from ray.tune.analysis import Analysis
 
 import figures
 import util
 
 
+RUN_ROOT = '/scratch/rmc78/ShortHorizonBias/runs_repeat'
 UCI_DATASETS = ['uci_boston',
                 'uci_concrete',
                 'uci_energy',
@@ -30,6 +32,8 @@ STANDALONE_LONGDIFFTHROUGHOPT_DATASETS = ['uci_energy_LongDiffThroughOpt_Standal
                                           'uci_kin8nm_LongDiffThroughOpt_Standalone',
                                           'uci_power_LongDiffThroughOpt_Standalone',
                                           'Fashion-MNIST_LongDiffThroughOpt_Standalone',]
+VALIDATION_PROPORTION_DATASETS = [f'uci_energy_ValidationProportion{prop}'
+                                  for prop in ('0.25', '0.375', '0.5')]
 ALGORITHM_LABELS = {
     'Random': "Random",
     'Random_SteppedLR': r"Random ($\times$ LR)",
@@ -41,7 +45,11 @@ ALGORITHM_LABELS = {
     'Ours_HDLR_Momentum': r"Ours$^\text{WD+HDLR+M}$",
     'DiffThroughOpt': "Diff-through-Opt",
     'LongDiffThroughOpt': "Diff-through-Opt", # User must update label
-    'BayesOpt': "Bayesian Optimisation"
+    'BayesOpt': "Bayesian Optimisation",
+    'ASHA_Random_TrainingSetOnly': "ASHA + Random",
+    'ASHA_Ours_LR_Momentum': r"ASHA + Ours$^\text{WD+LR+M}$",
+    'PBT_Random_TrainingSetOnly': "PBT + Random",
+    'PBT_Ours_LR_Momentum': r"PBT + Ours$^\text{WD+LR+M}$",
 }
 NAN_THRESHOLDS = {
     'uci_boston': None,
@@ -56,19 +64,25 @@ NAN_THRESHOLDS = {
     'uci_energy_LongDiffThroughOpt_Full': None,
     'uci_kin8nm_LongDiffThroughOpt_Standalone': None,
     'uci_power_LongDiffThroughOpt_Standalone': None,
+    'uci_energy_ValidationProportion0.25': None,
+    'uci_energy_ValidationProportion0.375': None,
+    'uci_energy_ValidationProportion0.5': None,
     'Fashion-MNIST': 1e3,
     'Fashion-MNIST_BatchNorm': 1e3,
     'Fashion-MNIST_LongDiffThroughOpt_Medium': 1e3,
     'Fashion-MNIST_LongDiffThroughOpt_Standalone': 1e3,
-    'PennTreebank': 1e5,
+    'PennTreebank': None,
     'CIFAR-10': None,
 }
 
 
 def metric(dataset):
+    if dataset == 'fashion_mnist':
+        return metric('Fashion-MNIST')
     if dataset in (UCI_DATASETS
                    + STANDALONE_LONGDIFFTHROUGHOPT_DATASETS[:-1]
-                   + ['uci_energy_LongDiffThroughOpt_Full']):
+                   + ['uci_energy_LongDiffThroughOpt_Full']
+                   + VALIDATION_PROPORTION_DATASETS):
         return 'Unnormalised_Loss/Test'
     elif dataset == 'PennTreebank':
         return 'Perplexity/Test'
@@ -82,9 +96,12 @@ def metric(dataset):
 
 
 def xlabel(dataset, evolution):
+    if dataset == 'fashion_mnist':
+        return xlabel('Fashion-MNIST')
     if dataset in (UCI_DATASETS
                    + STANDALONE_LONGDIFFTHROUGHOPT_DATASETS[:-1]
-                   + ['uci_energy_LongDiffThroughOpt_Full']):
+                   + ['uci_energy_LongDiffThroughOpt_Full']
+                   + VALIDATION_PROPORTION_DATASETS):
         label = 'Test MSE (Unnormalised)'
     elif dataset == 'PennTreebank':
         label = 'Test Perplexity'
@@ -106,7 +123,7 @@ def savefig(name):
     """Replace plt.show() with a custom function saving the figure to file."""
     with nofig():
         yield
-        plt.savefig(f'./docs/ICLR2022/Figures/{name}.pdf')
+        plt.savefig(f'./docs/ICLR2022_PostRebuttal/Figures/{name}.pdf')
         plt.tight_layout()
 
 
@@ -125,7 +142,8 @@ def paper_theme(exclude_algorithms=[],
                 use_custom_cycler=True,
                 use_bayesopt=False,
                 use_long_diffthroughopt=False,
-                long_diffthroughopt_standalone=False):
+                long_diffthroughopt_standalone=False,
+                ray_scheme_override=False):
     """Configure matplotlib to plot in a standard theme."""
     base03 = '#002b36'
     base02 = '#073642'
@@ -170,6 +188,13 @@ def paper_theme(exclude_algorithms=[],
         del design_spec['Ours_HDLR_Momentum']
     for algorithm in exclude_algorithms:
         design_spec.pop(algorithm, None)
+    if ray_scheme_override:
+        design_spec = {
+            'ASHA_Random_TrainingSetOnly': {'color': cyan, 'linestyle': '-'},
+            'ASHA_Ours_LR_Momentum': {'color': red, 'linestyle': '-'},
+            'PBT_Random_TrainingSetOnly': {'color': cyan, 'linestyle': '--'},
+            'PBT_Ours_LR_Momentum': {'color': red, 'linestyle': '--'},
+        }
 
     cycles = {}
     for algorithm, spec in design_spec.items():
@@ -191,11 +216,11 @@ def sensitivity_study():
     value_scale = 1000
     data_metric = metric('uci_energy')
     data_random = util.get_tags(
-        './runs/ICLR Sensitivity UCI_Energy Random', data_metric)
+        f'{RUN_ROOT}/ICLR Sensitivity UCI_Energy Random', data_metric)
     random_value = to.stack(data_random[data_metric])[:, -1].nanmedian().max() * value_scale
     global_max = -float('inf')
-    for root_dir in ('./runs/ICLR Sensitivity UCI_Energy Ours_LR_Momentum',
-                     './runs/ICLR Sensitivity UCI_Energy DiffThroughOpt'):
+    for root_dir in (f'{RUN_ROOT}/ICLR Sensitivity UCI_Energy Ours_LR_Momentum',
+                     f'{RUN_ROOT}/ICLR Sensitivity UCI_Energy DiffThroughOpt'):
         for sub_dir in os.scandir(root_dir):
             data = util.get_tags(sub_dir.path, data_metric)
             global_max = max(global_max,
@@ -204,13 +229,13 @@ def sensitivity_study():
 
     with savefig('Sensitivity_OursLRMomentum'):
         figures.plot_toy_ablation_heatmap(
-            './runs/ICLR Sensitivity UCI_Energy Ours_LR_Momentum',
+            f'{RUN_ROOT}/ICLR Sensitivity UCI_Energy Ours_LR_Momentum',
             normaliser=normaliser,
             num_format='{:.0f}',
             value_scale=value_scale)
     with savefig('Sensitivity_DiffThroughOpt'):
         figures.plot_toy_ablation_heatmap(
-            './runs/ICLR Sensitivity UCI_Energy DiffThroughOpt',
+            f'{RUN_ROOT}/ICLR Sensitivity UCI_Energy DiffThroughOpt',
             normaliser=normaliser,
             num_format='{:.0f}',
             value_scale=value_scale)
@@ -256,13 +281,13 @@ def hypergradient_comparison():
 
     with savefig('Hypergradients_Lr'):
         figures.plot_toy_ablation_heatmap(
-            './runs/ICLR HypergradientComparison',
+            f'{RUN_ROOT}/ICLR HypergradientComparison',
             data_extractor=partial(data_extractor, key='Last_Hyperparameter/Lr'),
             aggregator=np.nanmean,
             num_format='{:.1%}')
     with savefig('Hypergradients_Weight_Decay'):
         figures.plot_toy_ablation_heatmap(
-            './runs/ICLR HypergradientComparison',
+            f'{RUN_ROOT}/ICLR HypergradientComparison',
             data_extractor=partial(data_extractor, key='Last_Hyperparameter/Weight_Decay'),
             aggregator=np.nanmean,
             num_format='{:.0%}')
@@ -276,15 +301,17 @@ def loss_figures():
                           'Fashion-MNIST', 'PennTreebank', 'CIFAR-10',
                           'Fashion-MNIST_BatchNorm', 'Fashion-MNIST_LongDiffThroughOpt_Medium',
                           *STANDALONE_LONGDIFFTHROUGHOPT_DATASETS,
-                          'uci_energy_LongDiffThroughOpt_Full'))
+                          'uci_energy_LongDiffThroughOpt_Full',
+                          *VALIDATION_PROPORTION_DATASETS))
     for dataset in (UCI_DATASETS
                     + LARGE_SCALE_DATASETS
                     + STANDALONE_LONGDIFFTHROUGHOPT_DATASETS
                     + ['uci_energy_LongDiffThroughOpt_Full']
+                    + VALIDATION_PROPORTION_DATASETS
                     + ['Fashion-MNIST_BatchNorm', 'Fashion-MNIST_LongDiffThroughOpt_Medium']):
         print(f'    {dataset}...')
         print('        Collecting data...')
-        data = util.get_tags(f'./runs/ICLR {dataset}')
+        data = util.get_tags(f'{RUN_ROOT}/ICLR {dataset}')
 
         print('        Loss envelope...')
         with savefig(f'Envelope_{dataset}'), paper_theme(
@@ -297,7 +324,6 @@ def loss_figures():
                 nearly_nan_threshold=NAN_THRESHOLDS[dataset])
             plt.xlabel("Network Weight Update Step")
             plt.ylabel(xlabel(dataset, evolution=True))
-            plt.xlim(0, tuple(bootstrapped_data.values())[0].shape[-1])
             plt.gcf().set_size_inches(3, 3)
             plt.tight_layout()
 
@@ -321,7 +347,7 @@ def error_figures():
     for dataset in datasets:
         print(f'    {dataset}...')
         print('        Collecting data...')
-        data = util.get_tags(f'./runs/ICLR {dataset}')
+        data = util.get_tags(f'{RUN_ROOT}/ICLR {dataset}')
         data['Error/Test'] = [1 - accuracy
                               for accuracy in data['Accuracy/Test']]
         with nofig():
@@ -336,6 +362,75 @@ def error_figures():
                          source_data,
                          dataset,
                          'AverageErrors')
+
+
+def ray_statistics():
+    """Accumulate data from Ray Tune runs into the required format for the rest
+    of our machinery.
+    """
+    result_groups = {'ASHA': ('Random_TrainingSetOnly', 'Ours_LR_Momentum'),
+                     'PBT': ('Random_TrainingSetOnly', 'Ours_LR_Momentum')
+                     }
+    for experiment, algorithms in result_groups.items():
+        source_data = {}
+        bootstrapped_data = {}
+        for algorithm in algorithms:
+            print(f'    {experiment} {algorithm}...')
+            print('        Collecting data...')
+            all_dataframes = (Analysis(f'{RUN_ROOT}/{experiment} {algorithm}')
+                              .trial_dataframes.values())
+            complete_length = max(len(df['training_iteration'])
+                                  for df in all_dataframes)
+            final_losses = np.array([
+                df['unnormalised_test_loss'].tail(1)
+                for df in all_dataframes
+                if len(df['training_iteration']) == complete_length
+                or (experiment == 'PBT' and len(df['training_iteration']) >= 4000)])  # Keep non-crashed PBT dataframes
+            bootstrap_indices = util.bootstrap_sample(len(final_losses), 1000)
+            bootstrapped_data[f'{experiment}_{algorithm}'] = final_losses[bootstrap_indices]
+            source_data[f'{experiment}_{algorithm}'] = final_losses
+        write_statistics(bootstrapped_data,
+                         source_data,
+                         experiment,
+                         'AverageResults')
+
+
+def ray_best_evolution():
+    """Accumulate data from Ray Tune runs and plot the incumbent best result
+    yet found.
+    """
+    if not os.path.exists(f'{RUN_ROOT}/Ray_Evolution.pkl'):
+        data = {}
+        for experiment in ('ASHA', 'PBT'):
+            for algorithm in ('Random_TrainingSetOnly', 'Ours_LR_Momentum'):
+                print(f'    {experiment} {algorithm}...')
+                all_dataframes = (Analysis(f'{RUN_ROOT}/{experiment} {algorithm}')
+                                .trial_dataframes.values())
+                all_data = pd.concat([df[['timestamp', 'unnormalised_test_loss']]
+                                    for df in all_dataframes])
+                all_data = all_data.sort_values('timestamp')
+                all_data['timestamp'] = all_data['timestamp'] - all_data['timestamp'].head(1).values
+                all_data['unnormalised_test_loss'] = all_data['unnormalised_test_loss'].cummin()
+                data[f'{experiment}_{algorithm}'] = all_data
+
+        with open(f'{RUN_ROOT}/Ray_Evolution.pkl', 'wb') as f:
+            pickle.dump(data, f)
+    else:
+        with open(f'{RUN_ROOT}/Ray_Evolution.pkl', 'rb') as f:
+            data = pickle.load(f)
+
+    with savefig('HPOCurves_Ray'), paper_theme(
+            ray_scheme_override=True):
+        for label, cummin in data.items():
+            plt.plot(cummin['timestamp'], cummin['unnormalised_test_loss'],
+                     label=label)
+            plt.xscale('log')
+            plt.yscale('log')
+            plt.xlabel('Runtime (s)')
+            plt.ylabel('Test MSE (Unnormalised)')
+            plt.gcf().set_size_inches(4.5, 4.5)
+            plt.tight_layout()
+            plt.show()
 
 
 def write_statistics(bootstrapped_data, original_data, dataset, statistic_name):
@@ -363,7 +458,7 @@ def write_statistics(bootstrapped_data, original_data, dataset, statistic_name):
         statistics[algorithm]['median_error'] = np.nanstd(median_set)
         statistics[algorithm]['best_value'] = best_value
 
-    statistic_path = f'./docs/ICLR2022/Figures/{statistic_name}_{dataset}.pkl'
+    statistic_path = f'./docs/ICLR2022_PostRebuttal/Figures/{statistic_name}_{dataset}.pkl'
     with open(statistic_path, 'wb') as statistic_file:
         pickle.dump(statistics, statistic_file)
 
@@ -376,6 +471,10 @@ def write_all_tables():
         'AverageResults_UCI': {
             'datasets': ('uci_energy', 'uci_kin8nm', 'uci_power'),
             'statistic': 'AverageResults'},
+        'AverageResults_uci_energy': {
+            'datasets': ('uci_energy',),
+            'statistic': 'AverageResults',
+            'bold_best': False},
         'AverageResults_LargeScale': {
             'datasets': ('Fashion-MNIST', 'PennTreebank', 'CIFAR-10'),
             'statistic': 'AverageResults'},
@@ -418,16 +517,32 @@ def write_all_tables():
         'AverageResults_Fashion-MNIST_NonBayesOpt': {
             'datasets': ('Fashion-MNIST',),
             'statistic': 'AverageResults'},
+
+        'AverageResults_UCI_Energy_ValidationProportions': {
+            'datasets': ('uci_energy', 'uci_energy_ValidationProportion0.25', 'uci_energy_ValidationProportion0.375', 'uci_energy_ValidationProportion0.5'),
+            'statistic': 'AverageResults',
+            'excluded_algorithms': ['Random', 'Random_SteppedLR', 'Random_3Batched', 'Lorraine', 'Baydin', 'Ours_LR', 'DiffThroughOpt'],
+            'bold_best': False},
+
+        'AverageResults_ASHA': {
+            'datasets': ('ASHA',),
+            'statistic': 'AverageResults',
+            'bold_best': False},
+        'AverageResults_PBT': {
+            'datasets': ('PBT',),
+            'statistic': 'AverageResults',
+            'bold_best': False},
     }
     for table_name, table_spec in table_specs.items():
         print(f'    {table_name}...')
         write_table(table_spec['datasets'],
                     table_name,
                     table_spec['statistic'],
+                    table_spec.get('excluded_algorithms', []),
                     table_spec.get('bold_best', True))
 
 
-def write_table(table_datasets, table_name, statistic_names, bold_best=True):
+def write_table(table_datasets, table_name, statistic_names, excluded_algorithms=[], bold_best=True):
     """Use the `bootstrapped_data` statistics to produce a results table over
     `table_datasets`.
     """
@@ -442,9 +557,11 @@ def write_table(table_datasets, table_name, statistic_names, bold_best=True):
             block_statistic_names = [block_statistic_names]
         statistics = {}
         for dataset, statistic_name in zip(block_datasets, block_statistic_names):
-            statistic_path = f'./docs/ICLR2022/Figures/{statistic_name}_{dataset}.pkl'
+            statistic_path = f'./docs/ICLR2022_PostRebuttal/Figures/{statistic_name}_{dataset}.pkl'
             with open(statistic_path, 'rb') as statistic_file:
                 statistics.update(pickle.load(statistic_file))
+        for algorithm in excluded_algorithms:
+            statistics.pop(algorithm, None)
         # Move LongDiffThroughOpt to the end if it's here
         if 'LongDiffThroughOpt' in statistics:
             statistics['LongDiffThroughOpt'] = statistics.pop('LongDiffThroughOpt')
@@ -470,7 +587,7 @@ def write_table(table_datasets, table_name, statistic_names, bold_best=True):
                                          best_values[None, :],
                                          axis=0).squeeze()
 
-    with open(f'./docs/ICLR2022/Figures/{table_name}.tex', 'w') as table:
+    with open(f'./docs/ICLR2022_PostRebuttal/Figures/{table_name}.tex', 'w') as table:
         for algorithm, algorithm_values, algorithm_errors, algorithm_bests in zip(
                 statistics.keys(), table_values, table_errors, table_bests):
             algorithm_name = ALGORITHM_LABELS[algorithm]
@@ -538,9 +655,9 @@ def cdfs(force_fashion_mnist_data=None):
             data = force_fashion_mnist_data
         else:
             print(f'    {dataset} loss...')
-            data = util.get_tags(f'./runs/ICLR {dataset}')
+            data = util.get_tags(f'{RUN_ROOT}/ICLR {dataset}')
         if dataset == 'uci_energy_LongDiffThroughOpt_Full':
-            base_data = util.get_tags('./runs/ICLR uci_energy')
+            base_data = util.get_tags(f'{RUN_ROOT}/ICLR uci_energy')
             for key, value in data.items():
                 value.extend(base_data[key])
         with savefig(f'CDF_{dataset}'), paper_theme(
@@ -575,7 +692,7 @@ def cdfs(force_fashion_mnist_data=None):
             data = force_fashion_mnist_data
         else:
             print(f'    {dataset} error...')
-            data = util.get_tags(f'./runs/ICLR {dataset}')
+            data = util.get_tags(f'{RUN_ROOT}/ICLR {dataset}')
         data['Error/Test'] = [1 - accuracy for accuracy in data['Accuracy/Test']]
         with savefig(f'CDF_Error_{dataset}'), paper_theme(
                 use_long_diffthroughopt=bool(force_fashion_mnist_data),
@@ -606,8 +723,13 @@ def uci_sample_learning_rates():
     for dataset in UCI_DATASETS:
         print(f'    {dataset}...')
         run_ids = {algorithm: float('nan') for algorithm in ALGORITHM_LABELS.keys()
-                   if algorithm not in ('Random_3Batched', 'LongDiffThroughOpt')}
-        data = util.get_tags(f'./runs/ICLR {dataset}')
+                   if algorithm not in ('Random_3Batched',
+                                        'LongDiffThroughOpt',
+                                        'ASHA_Random_TrainingSetOnly',
+                                        'ASHA_Ours_LR_Momentum',
+                                        'PBT_Random_TrainingSetOnly',
+                                        'PBT_Ours_LR_Momentum')}
+        data = util.get_tags(f'{RUN_ROOT}/ICLR {dataset}')
         ids_without_lr_log = np.array([config['algorithm'] in no_lr_algorithms
                                        for config in data['config']])
         
@@ -644,7 +766,6 @@ def uci_sample_learning_rates():
 
             plt.xlabel('Network Weight Update Step')
             plt.ylabel('Learning Rate')
-            plt.xlim(0, total_steps)
             plt.yscale('log')
             plt.ylim(1e-6, None)
             plt.gcf().set_size_inches(3, 3)
@@ -656,7 +777,7 @@ def large_scale_runtimes():
     datasets.
     """
     for dataset in ("Fashion-MNIST", "CIFAR-10", "PennTreebank"):
-        data = util.get_tags(f'./runs/ICLR {dataset}')
+        data = util.get_tags(f'{RUN_ROOT}/ICLR {dataset}')
         with savefig(f'Runtime_{dataset}'), paper_theme(exclude_algorithms=['Random_3Batched']):
             figures.plot_runtime_violins(
                 data, exclude_algorithms=['Random_Validation'])
@@ -668,7 +789,7 @@ def large_scale_runtimes():
 
 def proof_of_concept():
     """Construct a proof of concept plot showing hyperparameter evolutions"""
-    data = util.get_tags('./runs/ICLR ProofOfConcept_Revised')
+    data = util.get_tags(f'{RUN_ROOT}/ICLR ProofOfConcept_Revised')
     with savefig('ProofOfConcept_uci_energy'), paper_theme(use_custom_cycler=False):
         plt.xlabel("Learning Rate")
         plt.ylabel("Weight Decay")
@@ -712,23 +833,27 @@ def best_performance_over_time():
         print(f'    {dataset}...')
         print('        Collecting data...')
         if dataset == 'Fashion-MNIST_Comparative_LongDiffThroughOpt':
-            data = util.get_tags('./runs/ICLR Fashion-MNIST')
-            long_data = util.get_tags('./runs/ICLR Fashion-MNIST_LongDiffThroughOpt_Medium')
+            data = util.get_tags(f'{RUN_ROOT}/ICLR Fashion-MNIST')
+            long_data = util.get_tags(f'{RUN_ROOT}/ICLR Fashion-MNIST_LongDiffThroughOpt_Medium')
             for key, value in data.items():
                 value.extend(long_data[key])
         elif dataset == 'uci_energy_LongDiffThroughOpt_Full':
-            data = util.get_tags('./runs/ICLR uci_energy_LongDiffThroughOpt_Full')
-            long_data = util.get_tags('./runs/ICLR uci_energy')
+            data = util.get_tags(f'{RUN_ROOT}/ICLR uci_energy_LongDiffThroughOpt_Full')
+            long_data = util.get_tags(f'{RUN_ROOT}/ICLR uci_energy')
             for key, value in data.items():
                 value.extend(long_data[key])
         else:
-            data = util.get_tags(f'./runs/ICLR {dataset}')
+            data = util.get_tags(f'{RUN_ROOT}/ICLR {dataset}')
         dataset_metric = metric(dataset)
         bayesopt = (dataset in bayesopt_datasets)
 
         if bayesopt:
+            bo_dataset = dataset
+            if bo_dataset == 'Fashion-MNIST':
+                # BayesOpt data uses a different capitalisation
+                bo_dataset = 'fashion_mnist'
             bayesopt_data = []
-            for subdir in os.scandir(f'./runs/ICLR BayesOpt_{dataset}'):
+            for subdir in os.scandir(f'{RUN_ROOT}/ICLR BayesOpt_{bo_dataset}'):
                 bo_repetition_data = util.get_tags(subdir.path, ordered=True)
                 bo_repetition_data[dataset_metric] = to.cat(bo_repetition_data[dataset_metric])
                 bo_repetition_data[dataset_metric + '/wall_time'] = to.cat(bo_repetition_data[dataset_metric + '/wall_time'])
@@ -779,8 +904,8 @@ def long_horizon_fashion_mnist_cdfs():
     results.
     """
     print('    Collecting data...')
-    data = util.get_tags('./runs/ICLR Fashion-MNIST')
-    long_data = util.get_tags('./runs/ICLR Fashion-MNIST_LongDiffThroughOpt_Medium')
+    data = util.get_tags(f'{RUN_ROOT}/ICLR Fashion-MNIST')
+    long_data = util.get_tags(f'{RUN_ROOT}/ICLR Fashion-MNIST_LongDiffThroughOpt_Medium')
     dataset_metric = metric('Fashion-MNIST')
     data[dataset_metric].extend(long_data[dataset_metric])
     data[dataset_metric + '/wall_time'].extend(long_data[dataset_metric + '/wall_time'])
@@ -800,7 +925,9 @@ if __name__ == '__main__':
         loss_figures,
         error_figures,
         best_performance_over_time,
+        ray_statistics,
         write_all_tables,
+        ray_best_evolution,
         uci_sample_learning_rates,
         large_scale_runtimes,
         proof_of_concept,

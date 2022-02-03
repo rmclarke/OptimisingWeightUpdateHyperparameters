@@ -36,6 +36,8 @@ class ExactHypergradientOptimiser():
         result = self.base_optimiser.load_state_dict(state_dict)
         for group, param_list in zip(self.base_optimiser.param_groups, params):
             group['params'] = param_list
+        new_state = {param: state for param, state in zip(*params, self.base_optimiser.state.values())}
+        self.base_optimiser.state = new_state
         return result
 
 
@@ -89,7 +91,7 @@ class NeumannHypergradientOptimiser(ExactHypergradientOptimiser):
     function u.
     """
 
-    max_useful_parameter_age = 2
+    max_useful_parameter_age = 1
 
     def __init__(self,
                  base_optimiser,
@@ -126,28 +128,41 @@ class NeumannHypergradientOptimiser(ExactHypergradientOptimiser):
         self.base_optimiser.step()
 
     def _hypergradient(self, validation_loss):
-        validation_grad_weights = to.autograd.grad(validation_loss,
-                                                   self.last_network_weights,
-                                                   retain_graph=True)
-        direct_gradient = to.autograd.grad(validation_loss,
-                                           self.hyperparameters,
-                                           allow_unused=True,
-                                           retain_graph=True)
-        direct_gradient = [to.zeros_like(h) if g is None
-                           else g
-                           for g, h in zip(direct_gradient,
-                                           self.hyperparameters)]
+        # ASSUMPTION
+        # The direct_gradient is zero in all our experiments, and is difficult
+        # to calculate by autograd, as we must backward through the
+        # computational graph while stopping gradients flowing through the
+        # network weights. Thus, we do not implement its calculation.
+        # The code below gives a sense of what this might look like, but it
+        # does not work. There is no clear implementation for
+        # block_gradients_through(), because we cannot change the requires_grad
+        # attributes of non-leaf nodes in the computational graph.
+        #
+        # with util.block_gradients_through(*self.network_weights):
+        #     direct_gradient = to.autograd.grad(validation_loss,
+        #                                        self.hyperparameters,
+        #                                        allow_unused=True,
+        #                                        retain_graph=True)
+        #     direct_gradient = [to.zeros_like(h) if g is None
+        #                        else g
+        #                        for g, h in zip(direct_gradient,
+        #                                        self.hyperparameters)]
 
         # Indirect gradient
-        network_weight_update = [new - old
+        # Negate the obvious (new - old) construction to match our paper's
+        # definition of the update function u
+        network_weight_update = [old - new
                                  for new, old in
                                  zip(self.network_weights,
                                      self.last_network_weights)]
+        validation_grad_weights = to.autograd.grad(validation_loss,
+                                                   self.network_weights,
+                                                   retain_graph=True)
 
         # Start inverse Hessian product
         summation_term = validation_grad_weights
         approximate_inverse_hessian_product = summation_term
-        for _ in range(self.hyperparameter_rollback_distance):
+        for _ in range(1, self.hyperparameter_rollback_distance):
             summation_term = [
                 st - grad
                 for st, grad in zip(
@@ -167,15 +182,15 @@ class NeumannHypergradientOptimiser(ExactHypergradientOptimiser):
             self.hyperparameters,
             grad_outputs=approximate_inverse_hessian_product,
             allow_unused=self.first_update)
+        # Include the negative on the outside of our expressions in paper
+        # equations 5 and 6
         indirect_gradient = [to.zeros_like(h) if g is None
-                             else g
+                             else -g
                              for g, h in zip(indirect_gradient,
                                              self.hyperparameters)]
 
         self.first_update = False
-        return [direct + indirect
-                for direct, indirect in zip(
-                        direct_gradient, indirect_gradient)]
+        return indirect_gradient
 
     def state_dict(self):
         state_dict = super().state_dict()

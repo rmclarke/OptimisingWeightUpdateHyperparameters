@@ -3,6 +3,9 @@
 #! Based on:
 #! Example SLURM job script for Wilkes2 (Broadwell, ConnectX-4, P100)
 #! Last updated: Mon 13 Nov 12:06:57 GMT 2017
+#! Further updated using new Ampere script:
+#! Example SLURM job script for Wilkes3 (AMD EPYC 7763, ConnectX-6, A100)
+#! Last updated: Fri 30 Jul 11:07:58 BST 2021
 #!
 
 #!#############################################################
@@ -20,7 +23,7 @@
 #! Note probably this should not exceed the total number of GPUs in use.
 #SBATCH --ntasks=1
 #! Specify the number of GPUs per node (between 1 and 4; must be 4 if nodes>1).
-#! Note that the job submission script will enforce no more than 3 cpus per GPU.
+#! Note that the job submission script will enforce no more than 32 cpus per GPU.
 #SBATCH --gres=gpu:1
 #! What types of email messages do you wish to receive?
 #SBATCH --mail-type=FAIL
@@ -29,9 +32,9 @@
 ##SBATCH --no-requeue
 
 #! Do not change:
-#SBATCH -p pascal
+#SBATCH -p ampere
 
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=32
 
 #SBATCH --array=1-50
 
@@ -52,11 +55,11 @@ mpi_tasks_per_node=$(echo "$SLURM_TASKS_PER_NODE" | sed -e  's/^\([0-9][0-9]*\).
 #! (note that SLURM reproduces the environment at submission irrespective of ~/.bashrc):
 . /etc/profile.d/modules.sh                # Leave this line (enables the module command)
 module purge                               # Removes all modules still loaded
-module load rhel7/default-gpu              # REQUIRED - loads the basic environment
+module load rhel8/default-amp              # REQUIRED - loads the basic environment
 
 module load python/3.7
-module load cuda/10.1
-module load cudnn/7.6_cuda-10.1
+module load cuda/11.1
+module load cudnn/8.0_cuda-11.1
 
 #! Insert additional module load commands after this line if needed:
 
@@ -72,14 +75,14 @@ load_path="/home/rmc78/ShortHorizonBias/PennTreebank/checkpoints/iteration_${SLU
 application="source .venv-slurm/bin/activate && python"
 
 #! Run options for the application:
-options="train.py -c ./configs/${subconfig}.yaml ./configs/penn_treebank.yaml ${init_path} -n "Iteration_${SLURM_ARRAY_TASK_ID}" -g ${subconfig} -l "${write_path}Part2/" -s ${load_path}"
+options="train.py -c ./configs/${subconfig}.yaml ./configs/penn_treebank.yaml ${init_path} -n "Iteration_${SLURM_ARRAY_TASK_ID}" -g ${subconfig} -l "${write_path}_Part2/" -s ${load_path}"
 
 #! Work directory (i.e. where the job will run):
 workdir="$SLURM_SUBMIT_DIR"  # The value of SLURM_SUBMIT_DIR sets workdir to the directory
                              # in which sbatch is run.
 
 #! Are you using OpenMP (NB this is unrelated to OpenMPI)? If so increase this
-#! safe value to no more than 12:
+#! safe value to no more than 128:
 export OMP_NUM_THREADS=1
 
 #! Number of MPI tasks to be started by the application per node and in total (do not change):

@@ -28,13 +28,18 @@ class MultiLayerPerceptron(to.nn.Module):
             to.manual_seed(random_seed)
         # Initialise layers with the first layer, so we cleanly avoid an
         # activation function on the final layer
-        layers = [to.nn.Linear(layer_sizes[0], layer_sizes[1])]
-        for input_size, output_size in zip(layer_sizes[1:], layer_sizes[2:]):
+        layers = [to.nn.Linear(layer_sizes[0], layer_sizes[1],
+                               bias=(not batch_norm
+                                     or len(layer_sizes) <= 2))]
+        for index, (input_size, output_size) in enumerate(
+                zip(layer_sizes[1:], layer_sizes[2:])):
             if batch_norm:
                 layers.append(to.nn.BatchNorm1d(input_size))
             layers.append(activation_function())
             layers.append(
-                to.nn.Linear(input_size, output_size))
+                to.nn.Linear(input_size, output_size,
+                             bias=(not batch_norm
+                                   or index == len(layer_sizes) - 3)))
         self.layers = to.nn.Sequential(*layers)
 
     def forward(self, data):

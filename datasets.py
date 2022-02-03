@@ -15,6 +15,9 @@ def make_split_datasets(dataset, validation_proportion=0, **dataset_kwargs):
     train_val_sizes = len(train_val_dataset) * np.array(
         [1 - validation_proportion, validation_proportion])
     train_val_sizes = np.rint(train_val_sizes).astype(np.int)
+    # If proportional split isn't exact, may need to adjust indices to avoid
+    # overflowing the dataset
+    train_val_sizes[-1] -= sum(train_val_sizes) - len(train_val_dataset)
     test_dataset = dataset(train=False, **dataset_kwargs)
 
     if normalise_inputs:

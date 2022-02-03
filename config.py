@@ -3,6 +3,7 @@
 import configargparse
 import datetime
 import multiprocessing
+import numpy as np
 import os
 import yaml
 
@@ -121,6 +122,10 @@ def load_config():
     parser.add('--reset_model_after_hyperparameter_update',
                type=yaml.safe_load,
                help='Whether to reset the model to its original state after updating hyperparameters')
+    parser.add('--reset_loop_before_hyperparameter_step',
+               type=int,
+               default=-1,
+               help='Restrict lookback distance by resetting gradient tracking this many steps before a hyperparameter update step')
     parser.add('--renew_model_reset_state_interval',
                type=int,
                default=None,
@@ -183,7 +188,8 @@ def log_directory(config_dict):
     """Compute, create and return the appropriate log directory, removing
     consumed components of the configuration.
     """
-    run_prefix = datetime.datetime.now().isoformat()
+    # Temporarily include extra random number for robustness
+    run_prefix = datetime.datetime.now().isoformat() + '-' + str(np.random.rand())
     run_suffix = config_dict.pop('run_name')
     log_root = config_dict.pop('log_root')
     if run_suffix is None:

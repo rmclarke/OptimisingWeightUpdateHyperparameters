@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import torch as to
+import tqdm
 from tensorboard.backend.event_processing.event_accumulator import SCALARS
 from tensorboard.backend.event_processing.event_multiplexer import EventMultiplexer
 
@@ -69,6 +70,13 @@ def load_tensorboard_data(directory, tags=None, ordered=False, penn_treebank=Fal
                 for event_id, event in enumerate(next_values):
                     next_values[event_id] = event._replace(
                         wall_time=event.wall_time - time_adjustment)
+                # The logging process which produced values will have an extra
+                # call to train.Learner.log_now(end_of_pass=False), which is
+                # duplicated by the first call in the process producing
+                # next_values. So if this isn't an end-of-pass tag,
+                # delete the last entry of values to remove the duplicate.
+                if not tag.startswith('Last_'):
+                    values = values[:-1]
                 values.extend(next_values)
             yield run_name, tag, values
 
@@ -274,3 +282,61 @@ def interpolate_timestamps(data_values, data_times, num_timestamps):
                                        run_values)
 
     return all_values, interp_timestamps
+
+
+def flatten_config(config, prefix=''):
+    """Transform the nested structure of `config` into a flat dictionary."""
+    result = {}
+    for key, value in config.items():
+        if isinstance(value, dict):
+            new_prefix = prefix + key + '.'
+            result.update(
+                flatten_config(value, prefix=new_prefix))
+        else:
+            result[prefix + key] = value
+    return result
+
+
+def common_configs(root_directory):
+    """Combine all configs in `root_directory`, noting common values of the
+    keys and those which vary."""
+    configs = get_tags(root_directory)['config']
+    common_keys = flatten_config(configs[0])
+    optional_keys = {}
+    different_keys = {}
+    for key, value in common_keys.items():
+        if isinstance(value, list):
+            common_keys[key] = tuple(value)
+
+    for config in configs:
+        config = flatten_config(config)
+        for key, value in config.items():
+            if isinstance(value, list):
+                value = tuple(value)
+
+            if key in different_keys:
+                different_keys[key].add(value)
+                continue
+            if key in optional_keys:
+                if optional_keys[key] == value:
+                    continue
+                else:
+                    different_keys[key] = set([optional_keys.pop(key),
+                                               value])
+                    continue
+            if key in common_keys:
+                if common_keys[key] == value:
+                    continue
+                else:
+                    different_keys[key] = set([common_keys.pop(key),
+                                               value])
+            else:  # key not anywhere
+                optional_keys[key] = value
+        common_keys_to_remove = []
+        for key in common_keys.keys():
+            if key not in config:
+                optional_keys[key] = common_keys[key]
+                common_keys_to_remove.append(key)
+        for key in common_keys_to_remove:
+            del common_keys[key]
+    return common_keys, optional_keys, different_keys

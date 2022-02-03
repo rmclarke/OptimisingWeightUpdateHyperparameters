@@ -5,8 +5,10 @@ import numpy as np
 import torch as to
 import json
 import os
+import pathlib
 import sys
 import tqdm
+import ray.tune as tune
 
 import bayesopt
 import config
@@ -55,7 +57,7 @@ def natural_sgd_generator(scheduled_lr=True, ablation_weights=False):
             'weight_decay': (-7, -2),
             'momentum': (0, 1)}}}
     if scheduled_lr:
-        random_ranges['config_dicts']['network_weight']['lr_multiplier'] = (0.995, 1.001)
+        random_ranges['config_dicts']['network_weight']['lr_multiplier'] = (0.95, 1.01)
     if ablation_weights:
         random_ranges['config_dicts']['model'] = {'initial_weights': ((-5, -5), (5, 5))}
     random_config = generate_random_config_from_template(random_ranges)
@@ -79,7 +81,10 @@ def sgd_from_directory(root_directory, scheduled_lr=False):
         config_path = os.path.join(root_directory, run_directory.name, "config.json")
         with open(config_path, 'r') as config_file:
             config = json.load(config_file)['config_dicts']['network_weight']
-            if not scheduled_lr:
+            if scheduled_lr:
+                if 'lr_multiplier' not in config:
+                    continue
+            else:
                 config.pop('lr_multiplier', None)
             config.pop('class', 'None')
             unique_configs.add(
@@ -108,7 +113,11 @@ def run_parallel(num_workers,
             sys.argv = sys.argv[:-2]
     else:
         master_config_dicts = [None]
-    with tqdm.tqdm(total=num_repetitions,
+    if num_repetitions is None:
+        total = None
+    else:
+        total = num_repetitions*len(master_config_dicts)
+    with tqdm.tqdm(total=total,
                    position=0,
                    smoothing=0) as master_progress:
         master_progress.set_lock(multiprocessing.RLock())
@@ -137,6 +146,108 @@ def run_parallel(num_workers,
         pool.join()
 
 
+def ray_tune_run_pbt(num_workers,
+                     num_repetitions,
+                     name,
+                     local_dir='/scratch/rmc78/ShortHorizonBias/runs'):
+    """Main execution function for managing Population-Based Training runs
+    using Ray Tune.
+    """
+    def clip_momentum(config):
+        config['momentum'] = np.clip(config['momentum'], 0, 1-1e-6)
+        return config
+
+    scheduler = tune.schedulers.PopulationBasedTraining(
+        time_attr="training_iteration",
+        perturbation_interval=100,
+        hyperparam_mutations={
+            'lr': tune.uniform(-6, -1),
+            'weight_decay': tune.uniform(-7, -2),
+            'momentum': tune.uniform(0, 1)},
+        custom_explore_fn=clip_momentum)
+
+    master_config = config.load_config()
+
+    tune.run(
+        ray_tune_trainable,
+        name=f"PBT {name}",
+        scheduler=scheduler,
+        metric='validation_loss',
+        mode='min',
+        stop={'training_iteration': 400*10},
+        # stop=lambda trial_id, result: not np.isfinite(result['validation_loss']),
+        checkpoint_score_attr='min-validation_loss',
+        num_samples=num_repetitions,
+        resources_per_trial={'cpu': 1, 'gpu': 1/num_workers},
+        local_dir=local_dir,
+        config={'master_config': master_config,
+                'num_workers': num_workers},
+        log_to_file=True,
+    )
+
+
+def ray_tune_run_asha(num_workers,
+                      num_repetitions,
+                      name,
+                      local_dir='/scratch/rmc78/ShortHorizonBias/runs'):
+    """Main execution function for managing Asynchronous HyberBand runs using
+    Ray Tune.
+    """
+
+    scheduler = tune.schedulers.ASHAScheduler(
+        time_attr='training_iteration',
+        max_t=400*10,
+    )
+
+    master_config = config.load_config()
+
+    tune.run(
+        ray_tune_trainable,
+        name=f"ASHA {name}",
+        scheduler=scheduler,
+        metric='validation_loss',
+        mode='min',
+        stop=lambda trial_id, result: not np.isfinite(result['validation_loss']),
+        num_samples=num_repetitions,
+        resources_per_trial={'cpu': 1, 'gpu': 1/num_workers},
+        local_dir=local_dir,
+        config={'master_config': master_config,
+                'num_workers': num_workers,
+                'lr': tune.uniform(-6, -1),
+                'weight_decay': tune.uniform(-7, -2),
+                'momentum': tune.uniform(0, 1-1e-6)},
+        log_to_file=True,
+    )
+
+
+def ray_tune_trainable(config, checkpoint_dir=None):
+    """Trainable function to start training one configuration under Ray Tune.
+    """
+    # Undo Ray's directory changing so our relative paths work
+    os.chdir(
+        pathlib.Path(__file__).parent.resolve())
+
+    momentum = config['momentum']
+    transformed_momentum = (-np.log((1 / momentum) - 1)).item()
+
+    repetition_override = {
+        '_ray_tune_config': True,
+        'config_dicts': {
+            'network_weight': {
+                'lr': config['lr'],
+                'weight_decay': config['weight_decay'],
+                'momentum': transformed_momentum}}}
+    if checkpoint_dir:
+        repetition_override['load_state'] = os.path.join(checkpoint_dir,
+                                                         'checkpoint.pt')
+
+    master_config = copy.deepcopy(config['master_config'])
+    if config['num_workers'] > 1:
+        tune.utils.wait_for_gpu(target_util=1-(1/config.pop('num_workers')))
+    train.main(config_dict=master_config,
+               config_override=repetition_override)
+
+
 def replicate_initialisations(root_directory):
     """Override generator which replicates the model initialisation of every
     run logged in `root_directory`.
@@ -151,7 +262,7 @@ def replicate_initialisations(root_directory):
 
 
 def hyperparameter_ablation_initialisations(true_lookback=False,
-                                            configs_per_setting=50):
+                                            configs_per_setting=100):
     base_config = config.load_config()
     group_name = base_config.get('run_group_name', "")
     run_configs = [natural_sgd_generator()
@@ -208,7 +319,9 @@ def random_configs_from_ablation_base(directory_prefix):
     """Read the original hyperparameter ablation study runs in
     `directory_prefix`*, and repeat equivalent runs using Random.
     """
-    run_configs = configs_from_directory(f"{directory_prefix}/Update1_Rollback1")
+    # Use Update10 to give 4000 network weight updates, matching other
+    # experiments. Rollback doesn't matter; we'll be ignoring it.
+    run_configs = configs_from_directory(f"{directory_prefix}/Update10_Rollback5")
     for run_config in run_configs:
         run_config['algorithm'] = 'Random'
         run_config['validation_proportion'] = 0
@@ -222,11 +335,15 @@ def random_configs_from_ablation_base(directory_prefix):
 def iteration_id():
     """Generate a config dict for sequential identification only."""
     counter = 1
-    logging_base = config.load_config().get('log_root', '.')
+    master_config = config.load_config()
+    logging_base = os.path.join(
+        master_config.get('log_root', '.'),
+        master_config.get('run_group_name', '.'))
 
     def configurator():
         nonlocal counter
-        override = {'run_group_name': f"Repeat_{counter}"}
+        override = {'run_group_name': f"Repeat_{counter}",
+                    'log_root': logging_base}
         log_folder = os.path.join(logging_base, override['run_group_name'])
         if not os.path.exists(log_folder):
             os.makedirs(log_folder)
@@ -237,17 +354,20 @@ def iteration_id():
     return configurator
 
 
-def hypergradient_comparison_ablation_initialisation():
-    """Return a natural_sgd_generator() initialisation with additional settings
+def hypergradient_comparison_ablation_initialisations():
+    """Return natural_sgd_generator() initialisations with additional settings
     configured for the production of comparable hypergradients.
     """
-    for config_override in hyperparameter_ablation_initialisations(true_lookback=True):
+    for config_override in hyperparameter_ablation_initialisations(
+            true_lookback=True, configs_per_setting=50):
         # Random seed from range of valid seeds
         (config_override
          .setdefault('config_dicts', {})
          .setdefault('model', {})
          ['random_seed']) = to.seed()
-        # Need two hyperparameter steps so the first gets fully logged
+        # Need two hyperparameter steps so the first gets fully logged;
+        # in order to properly log the initial state, we log _before_ each
+        # hyperparameter update
         config_override['hyperparameter_steps'] = 2
         yield config_override
 
@@ -281,8 +401,16 @@ def fix_missing_hyperparameter_clipping(root_directory):
 
 
 if __name__ == '__main__':
-    run_parallel(num_workers=8,
-                 num_repetitions=200,
-                 override_generator=natural_sgd_generator,
-                 algorithms=ALL_ALGORITHMS + ['Random_Validation'],
-                 main_function=train.main)
+    # Python <=3.8 uses a relative __file__; force it to be absolute
+    __file__ = os.path.abspath(__file__)
+    # run_parallel(num_workers=8,
+    #              num_repetitions=200,
+    #              override_generator=natural_sgd_generator,
+    #              algorithms=ALL_ALGORITHMS + ['Random_Validation'],
+    #              main_function=train.main)
+    #
+    # import signal
+    # import pdb
+    # signal.signal(signal.SIGUSR1, lambda *_: pdb.set_trace())
+    ray_tune_run_pbt(num_workers=8,
+                     num_repetitions=200)
