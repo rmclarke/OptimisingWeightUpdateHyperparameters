@@ -207,6 +207,13 @@ class CIFAR10(ExternalDataset):
     test_slice = slice(-10000, None)
 
     def __init__(self, *args, **kwargs):
+        # NOTE: These normaliser means and standard deviations are only correct
+        # if the pixel values have already been rescaled from [0, 255] to
+        # [0, 1], which our code does not do. Since batch normalisation in
+        # ResNet-18 will largely mitigate this error, so our published results
+        # remain valid, we leave this code as-is to allow for reproducibility.
+        # For any other use case, either divide the input data by 255 or update
+        # these normalisation coefficients.
         super().__init__(*args,
                          root='./data/CIFAR10',
                          transform=tvt.Compose([
